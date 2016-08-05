@@ -1,14 +1,12 @@
 import os
+import re
 
-from jose import jwt
-from functools import wraps
-
-from flask import request, current_app
-from flask_restful import reqparse, abort, Resource
+from flask import request, g, send_from_directory
+from flask_restful import reqparse, abort, Resource, fields, marshal_with
 from werkzeug import secure_filename
 
-from api.models import User, File
-from api.utils.errors import ValidationError
+from api.models import File, Folder
+from api.utils.decorators import login_required, validate_user, belongs_to_user
 
 BASE_DIR = os.path.abspath(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -16,29 +14,30 @@ BASE_DIR = os.path.abspath(
 
 ALLOWED_EXTENSIONS = set(['txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'])
 
-def login_required(f):
-    @wraps(f)
-    def func(*args, **kwargs):
-        if 'authorization' in request.headers:
-            try:
-                token = request.headers.get('authorization')
-                payload = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
-            except Exception as e:
-                abort(400, message="There was a problem while trying to parse your token -> {}".format(e.message))
-        token = request.headers()
-    return func
+file_array_serializer = {
+    'id': fields.String,
+    'name': fields.String,
+    'size': fields.Integer,
+    'uri': fields.String,
+    'is_folder': fields.Boolean,
+    'parent': fields.String,
+    'creator': fields.String,
+    'date_created': fields.DateTime(dt_format=  'rfc822'),
+    'date_modified': fields.DateTime(dt_format='rfc822'),
+}
 
-def validate_user(f):
-    @wraps(f)
-    def func(*args, **kwargs):
-        user_id = kwargs.get('user_id')
-        try:
-            user = User.find(user_id)
-            # Store the user in a globally accepted variable
-            return f(*args, **kwargs)
-        except:
-            abort(400, message="There was a problem while trying to get this user. The user might not exist")
-    return func
+file_serializer = {
+    'id': fields.String,
+    'name': fields.String,
+    'size': fields.Integer,
+    'uri': fields.String,
+    'is_folder': fields.Boolean,
+    'objects': fields.Nested(file_array_serializer, default=[]),
+    'parent': fields.String,
+    'creator': fields.String,
+    'date_created': fields.DateTime(dt_format='rfc822'),
+    'date_modified': fields.DateTime(dt_format='rfc822'),
+}
 
 def is_allowed(filename):
     return '.' in filename and \
@@ -46,47 +45,150 @@ def is_allowed(filename):
 
 
 class CreateList(Resource):
+    @login_required
     @validate_user
+    @marshal_with(file_array_serializer)
     def get(self, user_id):
         try:
-            return File.search({'creator': user_id})
+            return File.filter({'creator': user_id})
         except Exception as e:
             abort(500, message="There was an error while trying to get your files --> {}".format(e.message))
 
+    @login_required
     @validate_user
+    @marshal_with(file_serializer)
     def post(self, user_id):
         try:
             parser = reqparse.RequestParser()
-            parser.add_argument('parent', type=int, help='This should be the parent folder id')
+            parser.add_argument('name', type=str, help="This should be the folder name if creating a folder")
+            parser.add_argument('parent_id', type=str, help='This should be the parent folder id')
+            parser.add_argument('is_folder', type=bool, help="This indicates whether you are trying to create a folder or not")
             
             args = parser.parse_args()
-            
-            folder = args.get('folder', 0)
 
-            if not File.is_folder(folder):
-                raise Exception("This folder does not exist")
-            
-            files = request.files['file']
-           
-            if files and is_allowed(files.filename):
-                _dir = os.path.join(BASE_DIR, 'upload/{}/'.format(user_id))
+            name = args.get('name', None)
+            parent_id = args.get('parent_id', None)
+            is_folder =  args.get('is_folder', False)
 
-                # Create this directory if it doesn't already exist
-                if not os.path.isdir(_dir):
-                    os.mkdir(_dir)
+            parent = None
 
-                filename = secure_filename(files.filename)
-                to_path = os.path.join(_dir, filename)
-                files.save(to_path)
-                fileuri = os.path.join('upload/{}/'.format(user_id), filename)
-                filesize = os.path.getsize(to_path)
+            # Are we adding this to a parent folder?
+            if parent_id is not None:
+                parent = File.find(parent)
+                if parent is None:
+                    raise Exception("This folder does not exist")
+                if not parent['is_folder']:
+                    raise Exception("Select a valid folder to upload to")
 
-                return File.create(
-                    name=filename,
-                    uri=fileuri,
-                    size=filesize,
-                    parent=folder,
+            # Are we creating a folder?
+            if is_folder:
+                if name is None:
+                    raise Exception("You need to specify a name for this folder")
+
+                return Folder.create(
+                    name=name,
+                    parent=parent,
+                    is_folder=is_folder,
+                    tag=child_tag,
                     creator=user_id
                 )
+            else:
+                files = request.files['file']
+
+                if files and is_allowed(files.filename):
+                    _dir = os.path.join(BASE_DIR, 'upload/{}/'.format(user_id))
+
+                    if not os.path.isdir(_dir):
+                        os.mkdir(_dir)
+
+                    filename = secure_filename(files.filename)
+                    to_path = os.path.join(_dir, filename)
+                    files.save(to_path)
+                    fileuri = os.path.join('upload/{}/'.format(user_id), filename)
+                    filesize = os.path.getsize(to_path)
+
+                    created_file = File.create(
+                        name=filename,
+                        uri=fileuri,
+                        size=filesize,
+                        parent=parent,
+                        creator=user_id
+                    )
+
+                    return created_file
+                raise Exception("You did not supply a valid file in your request")
+        except Exception as e:
+            abort(500, message="There was an error while processing your request --> {}".format(e.message))
+
+class ViewEditDelete(Resource):
+    @login_required
+    @validate_user
+    @belongs_to_user
+    @marshal_with(file_serializer)
+    def get(self, user_id, file_id):
+        try:
+            should_download = request.args.get('download', False)
+            if should_download == 'true':
+                parts = os.path.split(g.file['uri'])
+                return send_from_directory(directory=parts[0], filename=parts[1])
+            return g.file
         except Exception as e:
             abort(500, message="There was an while processing your request --> {}".format(e.message))
+
+    @login_required
+    @validate_user
+    @belongs_to_user
+    @marshal_with(file_serializer)
+    def put(self, user_id, file_id):
+        try:
+            update_fields = {}
+            parser = reqparse.RequestParser()
+
+            parser.add_argument('name', type=str, help="New name for the file/folder")
+            parser.add_argument('parent_id', type=str, help="New parent folder for the file/folder")
+
+            args = parser.parse_args()
+
+            name = args.get('name', None)
+            parent_id = args.get('parent_id', None)
+
+            if name is not None:
+                update_fields['name'] = name
+
+            if parent_id is not None:
+                folder_access = File.filter({'id': parent_id, 'creator': user_id})
+                if not folder_access:
+                    abort(404, message="You don't have access to the folder you're trying to move this object to")
+
+                if g.file['is_folder']:
+                    update_fields['tag'] = "{}-{}".format(folder_access['tag'], folder_access['last_index'])
+                    Folder.move(g.file, folder_access)
+                else:
+                    File.move(g.file, folder_access)
+
+                update_fields['parent_id'] = parent_id
+
+            if g.file['is_folder']:
+                Folder.update(file_id, update_fields)
+            else:
+                File.update(file_id, update_fields)
+
+            return File.find(file_id)
+        except Exception as e:
+            abort(500, message="There was an while processing your request --> {}".format(e.message))
+
+    @login_required
+    @validate_user
+    @belongs_to_user
+    def delete(self, user_id, file_id):
+        hard_delete = request.args.get('hard_delete', False)
+        if hard_delete == 'true':
+            # Hard delete
+            pass
+        else:
+
+        # Set file reference active to false
+        # If the hard delete parameter is set, delete the file from the database and the file system
+        # If this is folder, set folder active reference to false
+        # If the hard delete parameter is set, delete folder, all nested files from database and file system
+            pass

@@ -16,6 +16,16 @@ class RethinkDBModel(object):
     def find(cls, id):
         return r.table(cls._table).get(id).run(conn)
 
+    @classmethod
+    def filter(cls, predicate):
+        return list(r.table(cls._table).filter(predicate).run(conn))
+
+    @classmethod
+    def update(cls, id, fields):
+        status = r.table(cls._table).get(id).update(fields).run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the update action")
+        return True
 
 class User(RethinkDBModel):
     _table = 'users'
@@ -45,11 +55,11 @@ class User(RethinkDBModel):
         if not len(docs):
             raise ValidationError("Could not find the e-mail address you specified")
 
-        _hash = doc[0]['password']
+        _hash = docs[0]['password']
 
         if cls.verify_password(password, _hash):
             try:
-                token = jwt.encode({'id': doc['id']}, current_app.config['SECRET_KEY'], algorithm='HS256')
+                token = jwt.encode({'id': docs[0]['id']}, current_app.config['SECRET_KEY'], algorithm='HS256')
                 return token
             except JWTError:
                 raise ValidationError("There was a problem while trying to create a JWT token.")
@@ -71,58 +81,129 @@ class File(RethinkDBModel):
     @classmethod
     def create(cls, **kwargs):
         name = kwargs.get('name')
-        size = kwargs.get('size', 0)
+        size = kwargs.get('size')
         uri = kwargs.get('uri')
         parent = kwargs.get('parent')
-        is_folder = kwargs.get('is_folder', False)
         creator = kwargs.get('creator')
+
+        # Direct parent ID
+        parent_id = '0' if parent is None else parent['id']
+
         doc = {
             'name': name,
             'size': size,
             'uri': uri,
-            'parent': parent,
+            'parent_id': parent_id,
             'creator': creator,
+            'status': True,
             'date_created': r.now(),
             'date_modified': r.now()
         }
+
         res = r.table(cls._table).insert(doc).run(conn)
         doc['id'] = res['generated_keys'][0]
+
+        if parent is not None:
+            Folder.add_object(parent, doc['id'])
+
         return doc
 
     @classmethod
-    def list_folder(cls, folder_id):
-        try:
-            folder_properties = cls.find(folder_id)
-            if folder_properties:
-                contents = list(r.table(cls._table).filter({'parent': folder_id}))
-                return {
-                    'props': folder_properties,
-                    'contents': contents
-                }
-        except Exception as e:
-            raise ("There was an error while trying to read the folder contents -> {}".format(e.message))
+    def find(cls, id):
+        file_ref = r.table(cls._table).get(id).run(conn)
+        return file_ref
 
     @classmethod
-    def get_folder(cls, folder_id):
-        res = list(r.table(cls._table).get(folder_id).run(conn))
-        if len(res):
-            return res
-        raise UnavailableContentError("The folder you are trying to access does not exist")
+    def move(cls, obj, to):
+        parent_tag = to['tag']
+        child_tag = obj['tag']
+        previous_folder_id = obj['parent_id']
+        previous_folder = Folder.find(previous_folder_id)
+        cls.remove_object(previous_folder, child_tag)
+        cls.add_object(to, child_tag)
 
-    @classmethod
-    def search(cls, predicate):
-        return list(r.table(cls._table).filter(predicate).run(conn))
-
-    @classmethod
-    def update(cls, id, fields):
-        status = r.table(cls._table).get(id).update(fields).run(conn)
-        if status.errors:
-            raise DatabaseProcessError("Could not complete the update action")
-        return False
 
     @classmethod
     def delete(cls, id):
         status = r.table(cls._table).get(id).delete().run(conn)
-        if status.errors:
+        if status['errors']:
             raise DatabaseProcessError("Could not complete the delete action")
-        return False
+        return True
+
+class Folder(RethinkDBModel):
+    @classmethod
+    def create(cls, **kwargs):
+        name = kwargs.get('name')
+        parent = kwargs.get('parent')
+        creator = kwargs.get('creator')
+
+        # Determine folder tag
+        parent_tag = '0' if parent is None else parent['tag']
+        tag = '{}-{}'.format(parent_tag, parent['last_index'])
+
+        # Direct parent ID
+        parent_id = '0' if parent is None else parent['id']
+
+        doc = {
+            'name': name,
+            'parent_id': parent_id,
+            'tag': tag,
+            'creator': creator,
+            'is_folder': True,
+            'last_index': 0,
+            'status': True,
+            'objects': None,
+            'date_created': r.now(),
+            'date_modified': r.now()
+        }
+
+        res = r.table(cls._table).insert(doc).run(conn)
+        doc['id'] = res['generated_keys'][0]
+
+        if parent is not None:
+            cls.add_object(parent, doc['id'])
+
+        return doc
+
+    @classmethod
+    def find(cls, id, listing=False):
+        file_ref = r.table(cls._table).get(id).run(conn)
+        if file_ref is not None:
+            if listing and file_ref['objects'] is not None:
+                file_ref['objects'] = list(r.table(cls._table).get_all(r.args(file_ref['objects'])).run(conn))
+        return file_ref
+
+    @classmethod
+    def move(cls, obj, to):
+        parent_tag = to['tag']
+        child_tag = obj['tag']
+        if len(parent_tag) > len(child_tag):
+            matches = re.match(child_tag, parent_tag)
+            if matches is not None:
+                raise Exception("You can't move this object to the specified folder")
+            previous_folder_id = obj['parent_id']
+            previous_folder = cls.find(previous_folder_id)
+            cls.remove_object(previous_folder, child_tag)
+            cls.add_object(to, child_tag, True)
+
+    @classmethod
+    def remove_object(cls, folder, object_id):
+        update_fields = folder['objects'] or []
+        while object_id in update_fields:
+            update_fields.remove(object_id)
+        cls.update(folder['id'], {'objects': update_fields})
+
+    @classmethod
+    def add_object(cls, folder, object_id, is_folder=False):
+        update_fields = folder['objects'] or []
+        update_fields.append(object_id)
+        if is_folder:
+            last_index = folder['last_index'] + 1
+        cls.update(folder['id'], {'objects': update_fields, 'last_index': last_index})
+
+    @classmethod
+    def delete(cls, id):
+        status = r.table(cls._table).get(id).delete().run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the delete action")
+        return True
