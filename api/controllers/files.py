@@ -156,7 +156,7 @@ class ViewEditDelete(Resource):
                 update_fields['name'] = name
 
             if parent_id is not None:
-                folder_access = File.filter({'id': parent_id, 'creator': user_id})
+                folder_access = Folder.filter({'id': parent_id, 'creator': user_id})
                 if not folder_access:
                     abort(404, message="You don't have access to the folder you're trying to move this object to")
 
@@ -183,8 +183,9 @@ class ViewEditDelete(Resource):
     def delete(self, user_id, file_id):
         hard_delete = request.args.get('hard_delete', False)
         if hard_delete == 'true':
-            # Hard delete
-            pass
+            if not g.file['is_folder']:
+                os.remove(g.file['uri'])
+                File.delete(file_id)
         else:
 
         # Set file reference active to false

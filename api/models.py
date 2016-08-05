@@ -1,4 +1,6 @@
 import os
+import re
+
 import rethinkdb as r
 from jose import jwt
 from jose.exceptions import JWTError
@@ -95,6 +97,7 @@ class File(RethinkDBModel):
             'uri': uri,
             'parent_id': parent_id,
             'creator': creator,
+            'is_folder': False,
             'status': True,
             'date_created': r.now(),
             'date_modified': r.now()
@@ -119,8 +122,8 @@ class File(RethinkDBModel):
         child_tag = obj['tag']
         previous_folder_id = obj['parent_id']
         previous_folder = Folder.find(previous_folder_id)
-        cls.remove_object(previous_folder, child_tag)
-        cls.add_object(to, child_tag)
+        cls.remove_object(previous_folder, obj['id'])
+        cls.add_object(to, obj['id'])
 
 
     @classmethod
@@ -183,8 +186,8 @@ class Folder(RethinkDBModel):
                 raise Exception("You can't move this object to the specified folder")
             previous_folder_id = obj['parent_id']
             previous_folder = cls.find(previous_folder_id)
-            cls.remove_object(previous_folder, child_tag)
-            cls.add_object(to, child_tag, True)
+            cls.remove_object(previous_folder, obj['id'])
+            cls.add_object(to, obj['id'], True)
 
     @classmethod
     def remove_object(cls, folder, object_id):
