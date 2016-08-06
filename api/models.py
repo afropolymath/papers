@@ -29,6 +29,27 @@ class RethinkDBModel(object):
             raise DatabaseProcessError("Could not complete the update action")
         return True
 
+    @classmethod
+    def delete(cls, id):
+        status = r.table(cls._table).get(id).delete().run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the delete action")
+        return True
+
+    @classmethod
+    def update_where(cls, predicate, fields):
+        status = r.table(cls._table).filter(predicate).update(fields).run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the update action")
+        return True
+
+    @classmethod
+    def delete_where(cls, predicate):
+        status = r.table(cls._table).filter(predicate).delete().run(conn)
+        if status['errors']:
+            raise DatabaseProcessError("Could not complete the delete action")
+        return True
+
 class User(RethinkDBModel):
     _table = 'users'
 
@@ -45,8 +66,8 @@ class User(RethinkDBModel):
             'fullname': fullname,
             'email': email,
             'password': password,
-            'date_created': r.now(),
-            'date_modified': r.now()
+            'date_created': datetime.now(r.make_timezone('+01:00')),
+            'date_modified': datetime.now(r.make_timezone('+01:00'))
         }
         r.table(cls._table).insert(doc).run(conn)
 
@@ -99,8 +120,8 @@ class File(RethinkDBModel):
             'creator': creator,
             'is_folder': False,
             'status': True,
-            'date_created': r.now(),
-            'date_modified': r.now()
+            'date_created': datetime.now(r.make_timezone('+01:00')),
+            'date_modified': datetime.now(r.make_timezone('+01:00'))
         }
 
         res = r.table(cls._table).insert(doc).run(conn)
@@ -112,37 +133,26 @@ class File(RethinkDBModel):
         return doc
 
     @classmethod
-    def find(cls, id):
+    def find(cls, id, listing=False):
         file_ref = r.table(cls._table).get(id).run(conn)
+        if file_ref is not None:
+            if file_ref['is_folder'] and listing and file_ref['objects'] is not None:
+                file_ref['objects'] = list(r.table(cls._table).get_all(r.args(file_ref['objects'])).run(conn))
         return file_ref
 
     @classmethod
     def move(cls, obj, to):
-        parent_tag = to['tag']
-        child_tag = obj['tag']
         previous_folder_id = obj['parent_id']
         previous_folder = Folder.find(previous_folder_id)
-        cls.remove_object(previous_folder, obj['id'])
-        cls.add_object(to, obj['id'])
+        Folder.remove_object(previous_folder, obj['id'])
+        Folder.add_object(to, obj['id'])
 
-
-    @classmethod
-    def delete(cls, id):
-        status = r.table(cls._table).get(id).delete().run(conn)
-        if status['errors']:
-            raise DatabaseProcessError("Could not complete the delete action")
-        return True
-
-class Folder(RethinkDBModel):
+class Folder(File):
     @classmethod
     def create(cls, **kwargs):
         name = kwargs.get('name')
         parent = kwargs.get('parent')
         creator = kwargs.get('creator')
-
-        # Determine folder tag
-        parent_tag = '0' if parent is None else parent['tag']
-        tag = '{}-{}'.format(parent_tag, parent['last_index'])
 
         # Direct parent ID
         parent_id = '0' if parent is None else parent['id']
@@ -150,43 +160,44 @@ class Folder(RethinkDBModel):
         doc = {
             'name': name,
             'parent_id': parent_id,
-            'tag': tag,
             'creator': creator,
             'is_folder': True,
             'last_index': 0,
             'status': True,
             'objects': None,
-            'date_created': r.now(),
-            'date_modified': r.now()
+            'date_created': datetime.now(r.make_timezone('+01:00')),
+            'date_modified': datetime.now(r.make_timezone('+01:00'))
         }
 
         res = r.table(cls._table).insert(doc).run(conn)
         doc['id'] = res['generated_keys'][0]
 
         if parent is not None:
-            cls.add_object(parent, doc['id'])
+            cls.add_object(parent, doc['id'], True)
+
+        cls.tag_folder(parent, doc['id'])
 
         return doc
 
     @classmethod
-    def find(cls, id, listing=False):
-        file_ref = r.table(cls._table).get(id).run(conn)
-        if file_ref is not None:
-            if listing and file_ref['objects'] is not None:
-                file_ref['objects'] = list(r.table(cls._table).get_all(r.args(file_ref['objects'])).run(conn))
-        return file_ref
-
-    @classmethod
     def move(cls, obj, to):
-        parent_tag = to['tag']
-        child_tag = obj['tag']
-        if len(parent_tag) > len(child_tag):
-            matches = re.match(child_tag, parent_tag)
-            if matches is not None:
-                raise Exception("You can't move this object to the specified folder")
-            previous_folder_id = obj['parent_id']
-            previous_folder = cls.find(previous_folder_id)
-            cls.remove_object(previous_folder, obj['id'])
+        if to is not None:
+            parent_tag = to['tag']
+            child_tag = obj['tag']
+
+            parent_sections = parent_tag.split("#")
+            child_sections = child_tag.split("#")
+
+            if len(parent_sections) > len(child_sections):
+                matches = re.match(child_tag, parent_tag)
+                if matches is not None:
+                    raise Exception("You can't move this object to the specified folder")
+
+        previous_folder_id = obj['parent_id']
+        previous_folder = cls.find(previous_folder_id)
+        cls.remove_object(previous_folder, obj['id'])
+
+        if to is not None:
             cls.add_object(to, obj['id'], True)
 
     @classmethod
@@ -198,15 +209,15 @@ class Folder(RethinkDBModel):
 
     @classmethod
     def add_object(cls, folder, object_id, is_folder=False):
+        p = {}
         update_fields = folder['objects'] or []
         update_fields.append(object_id)
         if is_folder:
-            last_index = folder['last_index'] + 1
-        cls.update(folder['id'], {'objects': update_fields, 'last_index': last_index})
+            p['last_index'] = folder['last_index'] + 1
+        p['objects'] = update_fields
+        cls.update(folder['id'], p)
 
     @classmethod
-    def delete(cls, id):
-        status = r.table(cls._table).get(id).delete().run(conn)
-        if status['errors']:
-            raise DatabaseProcessError("Could not complete the delete action")
-        return True
+    def tag_folder(cls, parent, id):
+        tag = id if parent is None else '{}#{}'.format(parent['tag'], parent['last_index'])
+        cls.update(id, {'tag': tag})

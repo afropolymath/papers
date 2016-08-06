@@ -20,7 +20,7 @@ file_array_serializer = {
     'size': fields.Integer,
     'uri': fields.String,
     'is_folder': fields.Boolean,
-    'parent': fields.String,
+    'parent_id': fields.String,
     'creator': fields.String,
     'date_created': fields.DateTime(dt_format=  'rfc822'),
     'date_modified': fields.DateTime(dt_format='rfc822'),
@@ -33,7 +33,7 @@ file_serializer = {
     'uri': fields.String,
     'is_folder': fields.Boolean,
     'objects': fields.Nested(file_array_serializer, default=[]),
-    'parent': fields.String,
+    'parent_id': fields.String,
     'creator': fields.String,
     'date_created': fields.DateTime(dt_format='rfc822'),
     'date_modified': fields.DateTime(dt_format='rfc822'),
@@ -74,12 +74,11 @@ class CreateList(Resource):
 
             # Are we adding this to a parent folder?
             if parent_id is not None:
-                parent = File.find(parent)
+                parent = File.find(parent_id)
                 if parent is None:
                     raise Exception("This folder does not exist")
                 if not parent['is_folder']:
                     raise Exception("Select a valid folder to upload to")
-
             # Are we creating a folder?
             if is_folder:
                 if name is None:
@@ -89,7 +88,6 @@ class CreateList(Resource):
                     name=name,
                     parent=parent,
                     is_folder=is_folder,
-                    tag=child_tag,
                     creator=user_id
                 )
             else:
@@ -107,15 +105,13 @@ class CreateList(Resource):
                     fileuri = os.path.join('upload/{}/'.format(user_id), filename)
                     filesize = os.path.getsize(to_path)
 
-                    created_file = File.create(
+                    return File.create(
                         name=filename,
                         uri=fileuri,
                         size=filesize,
                         parent=parent,
                         creator=user_id
                     )
-
-                    return created_file
                 raise Exception("You did not supply a valid file in your request")
         except Exception as e:
             abort(500, message="There was an error while processing your request --> {}".format(e.message))
@@ -155,13 +151,14 @@ class ViewEditDelete(Resource):
             if name is not None:
                 update_fields['name'] = name
 
-            if parent_id is not None:
-                folder_access = Folder.filter({'id': parent_id, 'creator': user_id})
-                if not folder_access:
-                    abort(404, message="You don't have access to the folder you're trying to move this object to")
+            if parent_id is not None and g.file['parent_id'] != parent_id:
+                if parent_id != '0':
+                    folder_access = Folder.filter({'id': parent_id, 'creator': user_id})
+                    if not folder_access:
+                        abort(404, message="You don't have access to the folder you're trying to move this object to")
 
                 if g.file['is_folder']:
-                    update_fields['tag'] = "{}-{}".format(folder_access['tag'], folder_access['last_index'])
+                    update_fields['tag'] = g.file['id'] if parent_id == '0' else '{}#{}'.format(folder_access['tag'], folder['last_index'])
                     Folder.move(g.file, folder_access)
                 else:
                     File.move(g.file, folder_access)
@@ -182,14 +179,19 @@ class ViewEditDelete(Resource):
     @belongs_to_user
     def delete(self, user_id, file_id):
         hard_delete = request.args.get('hard_delete', False)
-        if hard_delete == 'true':
-            if not g.file['is_folder']:
+        if not g.file['is_folder']:
+            if hard_delete == 'true':
                 os.remove(g.file['uri'])
                 File.delete(file_id)
+            else:
+                File.update(file_id, {'status': False})
         else:
-
-        # Set file reference active to false
-        # If the hard delete parameter is set, delete the file from the database and the file system
-        # If this is folder, set folder active reference to false
-        # If the hard delete parameter is set, delete folder, all nested files from database and file system
-            pass
+            if hard_delete == True:
+                folders = Folder.filter(lambda folder: folder['tag'].startswith(g.file['tag']))
+                for folder in folders:
+                    files = File.filter({'parent_id': folder['id'], 'is_folder': False })
+                    File.delete({'parent_id': folder['id'], 'is_folder': False })
+                    for f in files:
+                        os.remove(f['uri'])
+            else:
+                File.update({'parent_id': folder['id']}, {'status': False})
