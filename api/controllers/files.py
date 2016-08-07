@@ -178,20 +178,25 @@ class ViewEditDelete(Resource):
     @validate_user
     @belongs_to_user
     def delete(self, user_id, file_id):
-        hard_delete = request.args.get('hard_delete', False)
-        if not g.file['is_folder']:
-            if hard_delete == 'true':
-                os.remove(g.file['uri'])
-                File.delete(file_id)
+        try:
+            hard_delete = request.args.get('hard_delete', False)
+            if not g.file['is_folder']:
+                if hard_delete == 'true':
+                    os.remove(g.file['uri'])
+                    File.delete(file_id)
+                else:
+                    File.update(file_id, {'status': False})
             else:
-                File.update(file_id, {'status': False})
-        else:
-            if hard_delete == 'true':
-                folders = Folder.filter(lambda folder: folder['tag'].startswith(g.file['tag']))
-                for folder in folders:
-                    files = File.filter({'parent_id': folder['id'], 'is_folder': False })
-                    File.delete({'parent_id': folder['id'], 'is_folder': False })
-                    for f in files:
-                        os.remove(f['uri'])
-            else:
-                File.update({'parent_id': folder['id']}, {'status': False})
+                if hard_delete == 'true':
+                    folders = Folder.filter(lambda folder: folder['tag'].startswith(g.file['tag']))
+                    for folder in folders:
+                        files = File.filter({'parent_id': folder['id'], 'is_folder': False })
+                        File.delete({'parent_id': folder['id'], 'is_folder': False })
+                        for f in files:
+                            os.remove(f['uri'])
+                else:
+                    File.update(file_id, {'status': False})
+                    File.update({'parent_id': file_id}, {'status': False})
+            return "File has been deleted successfully", 204
+        except:
+            abort(500, message="There was an error while processing your request --> {}".format(e.message))
