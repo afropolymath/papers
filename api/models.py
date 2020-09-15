@@ -1,15 +1,21 @@
 import os
 import re
 
-import rethinkdb as r
+#import rethinkdb as r
 from jose import jwt
+#import jwt
 from jose.exceptions import JWTError
+from jose import JOSEError as Error
 from datetime import datetime
 from passlib.hash import pbkdf2_sha256
 
 from flask import current_app
 
 from api.utils.errors import ValidationError, DatabaseProcessError, UnavailableContentError
+
+from rethinkdb import RethinkDB
+r = RethinkDB()
+
 
 conn = r.connect(db="papers")
 

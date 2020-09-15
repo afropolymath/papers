@@ -23,8 +23,8 @@ def migrate():
                 if base.__name__ == "RethinkDBModel":
                     table_name = getattr(cls[1], '_table')
                     r.db('papers').table_create(table_name).run(conn)
-                    print "Created table '{}'...".format(table_name)
-        print "Running RethinkDB migration command"
+                    print ("Created table '{}'...").format(table_name)
+        print ("Running RethinkDB migration command")
     except Exception as e:
         cprint("An error occured --> {}".format(e.message), 'red', attrs=['bold'])
 
